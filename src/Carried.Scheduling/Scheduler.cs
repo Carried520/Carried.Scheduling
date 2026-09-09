@@ -5,26 +5,25 @@ namespace Carried.Scheduling;
 public sealed class Scheduler
 {
     private readonly TimeProvider _timeProvider;
-    private readonly IReadOnlyList<ScheduledJob> _registeredJobs;
     private readonly JobExecutor _jobExecutor = new();
     private readonly PriorityQueue<ScheduledJob, DateTimeOffset> _scheduleQueue = new();
     private readonly int _maxConcurrency;
 
+    private readonly Channel<JobRegistration> _registrationChannel =
+        Channel.CreateUnbounded<JobRegistration>();
+
     private readonly Channel<ScheduledJob> _executionChannel =
         Channel.CreateUnbounded<ScheduledJob>();
 
-    public Scheduler(IEnumerable<ScheduledJob> registeredJobs,
+    public Scheduler(
         TimeProvider? timeProvider = null,
         int maxConcurrency = 1)
     {
-        ArgumentNullException.ThrowIfNull(registeredJobs);
-
         if (maxConcurrency <= 0)
             throw new ArgumentOutOfRangeException(
                 nameof(maxConcurrency),
                 "Maximum concurrency must be greater than zero.");
 
-        _registeredJobs = registeredJobs.ToArray();
         _timeProvider = timeProvider ?? TimeProvider.System;
         _maxConcurrency = maxConcurrency;
     }
@@ -40,43 +39,68 @@ public sealed class Scheduler
         await Task.WhenAll(executionTasks.Prepend(schedulingTask));
     }
 
+    public ValueTask RegisterAsync(ScheduledJob scheduledJob, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(scheduledJob);
+
+        var registration = new JobRegistration(scheduledJob, _timeProvider.GetUtcNow());
+
+        return _registrationChannel.Writer.WriteAsync(registration, cancellationToken);
+    }
+
     private async Task RunSchedulingLoopAsync(CancellationToken cancellationToken = default)
     {
         try
         {
-            DateTimeOffset now = _timeProvider.GetUtcNow();
-
-            foreach (ScheduledJob scheduledJob in _registeredJobs)
+            while (true)
             {
-                DateTimeOffset? nextOccurrence = scheduledJob.Schedule.GetNextOccurrence(now);
+                cancellationToken.ThrowIfCancellationRequested();
 
-                if (nextOccurrence is not null)
+                while (_registrationChannel.Reader.TryRead(out JobRegistration? registration))
                 {
-                    _scheduleQueue.Enqueue(scheduledJob, nextOccurrence.Value);
+                    RegisterJob(registration);
                 }
-            }
 
-            while (!cancellationToken.IsCancellationRequested)
-            {
                 if (!_scheduleQueue.TryPeek(
-                        out ScheduledJob? scheduledJob,
+                        out ScheduledJob? nextJob,
                         out DateTimeOffset dueAt))
-                    break;
+                {
+                    JobRegistration registration = await _registrationChannel.Reader.ReadAsync(cancellationToken);
 
-                now = _timeProvider.GetUtcNow();
+                    RegisterJob(registration);
+                    continue;
+                }
 
-                if (now < dueAt)
-                    await Task.Delay(dueAt - now, _timeProvider, cancellationToken);
+                DateTimeOffset now = _timeProvider.GetUtcNow();
 
-                _scheduleQueue.Dequeue();
+                if (now >= dueAt)
+                {
+                    _scheduleQueue.Dequeue();
 
-                await _executionChannel.Writer.WriteAsync(scheduledJob, cancellationToken);
+                    await _executionChannel.Writer.WriteAsync(nextJob, cancellationToken);
 
-                now = _timeProvider.GetUtcNow();
-                DateTimeOffset? nextJobOccurrence = scheduledJob.Schedule.GetNextOccurrence(now);
+                    now = _timeProvider.GetUtcNow();
 
-                if (nextJobOccurrence.HasValue)
-                    _scheduleQueue.Enqueue(scheduledJob, nextJobOccurrence.Value);
+                    DateTimeOffset? nextOccurrence = nextJob.Schedule.GetNextOccurrence(now);
+
+                    if (nextOccurrence.HasValue)
+                    {
+                        _scheduleQueue.Enqueue(nextJob, nextOccurrence.Value);
+                    }
+
+                    continue;
+                }
+
+                using var waitCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+                Task delayTask = Task.Delay(dueAt - now, _timeProvider, waitCts.Token);
+
+                Task<bool> registrationTask = _registrationChannel.Reader.WaitToReadAsync(waitCts.Token).AsTask();
+
+                Task completedTask = await Task.WhenAny(delayTask, registrationTask);
+
+                await completedTask;
+                await waitCts.CancelAsync();
             }
         }
         finally
@@ -92,4 +116,18 @@ public sealed class Scheduler
             await _jobExecutor.ExecuteAsync(scheduledJob.Job, cancellationToken);
         }
     }
+
+    private void RegisterJob(JobRegistration registration)
+    {
+        DateTimeOffset? nextOccurrence = registration.Job.Schedule.GetNextOccurrence(registration.RegisteredAt);
+
+        if (nextOccurrence is not null)
+        {
+            _scheduleQueue.Enqueue(registration.Job , nextOccurrence.Value);
+        }
+    }
+
+    private sealed record JobRegistration(
+        ScheduledJob Job,
+        DateTimeOffset RegisteredAt);
 }
