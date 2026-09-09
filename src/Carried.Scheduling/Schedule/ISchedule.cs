@@ -1,4 +1,4 @@
-namespace Carried.Scheduling;
+namespace Carried.Scheduling.Schedule;
 
 public interface ISchedule
 {

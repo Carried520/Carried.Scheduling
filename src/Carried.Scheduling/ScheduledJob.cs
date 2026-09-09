@@ -1,3 +1,5 @@
+using Carried.Scheduling.Schedule;
+
 namespace Carried.Scheduling;
 
 public sealed class ScheduledJob

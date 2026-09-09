@@ -12,7 +12,7 @@ public sealed class Scheduler
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
-    public async Task RunAsync(CancellationToken cancellationToken)
+    public async Task RunAsync(CancellationToken cancellationToken = default)
     {
         DateTimeOffset now = _timeProvider.GetUtcNow();
 

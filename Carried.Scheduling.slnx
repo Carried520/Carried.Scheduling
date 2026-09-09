@@ -1,3 +1,9 @@
 <Solution>
-  <Project Path="Carried.Scheduling/Carried.Scheduling.csproj" />
+    <Folder Name="/src/">
+        <Project Path="src/Carried.Scheduling/Carried.Scheduling.csproj" />
+    </Folder>
+
+    <Folder Name="/tests/">
+        <Project Path="tests/Carried.Scheduling.Tests/Carried.Scheduling.Tests.csproj" />
+    </Folder>
 </Solution>
