@@ -1,63 +1,78 @@
+using System.Threading.Channels;
+
 namespace Carried.Scheduling;
 
 public sealed class Scheduler
 {
     private readonly TimeProvider _timeProvider;
-    private readonly IEnumerable<ScheduledJob> _registeredJobs;
+    private readonly IReadOnlyList<ScheduledJob> _registeredJobs;
+    private readonly JobExecutor _jobExecutor = new();
     private readonly PriorityQueue<ScheduledJob, DateTimeOffset> _scheduleQueue = new();
+
+    private readonly Channel<ScheduledJob> _executionChannel =
+        Channel.CreateUnbounded<ScheduledJob>();
 
     public Scheduler(IEnumerable<ScheduledJob> registeredJobs, TimeProvider? timeProvider = null)
     {
-        _registeredJobs = registeredJobs;
+        _registeredJobs = registeredJobs.ToArray();
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
-        DateTimeOffset now = _timeProvider.GetUtcNow();
+        await Task.WhenAll(RunSchedulingLoopAsync(cancellationToken), RunExecutionLoopAsync(cancellationToken));
+    }
 
-        foreach (ScheduledJob scheduledJob in _registeredJobs)
+    private async Task RunSchedulingLoopAsync(CancellationToken cancellationToken = default)
+    {
+        try
         {
-            DateTimeOffset? nextOccurrence = scheduledJob.Schedule.GetNextOccurrence(now);
+            DateTimeOffset now = _timeProvider.GetUtcNow();
 
-            if (nextOccurrence is not null)
+            foreach (ScheduledJob scheduledJob in _registeredJobs)
             {
-                _scheduleQueue.Enqueue(scheduledJob, nextOccurrence.Value);
+                DateTimeOffset? nextOccurrence = scheduledJob.Schedule.GetNextOccurrence(now);
+
+                if (nextOccurrence is not null)
+                {
+                    _scheduleQueue.Enqueue(scheduledJob, nextOccurrence.Value);
+                }
+            }
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                if (!_scheduleQueue.TryPeek(
+                        out ScheduledJob? scheduledJob,
+                        out DateTimeOffset dueAt))
+                    break;
+
+                now = _timeProvider.GetUtcNow();
+
+                if (now < dueAt)
+                    await Task.Delay(dueAt - now, _timeProvider, cancellationToken);
+
+                _scheduleQueue.Dequeue();
+
+                await _executionChannel.Writer.WriteAsync(scheduledJob, cancellationToken);
+
+                now = _timeProvider.GetUtcNow();
+                DateTimeOffset? nextJobOccurrence = scheduledJob.Schedule.GetNextOccurrence(now);
+
+                if (nextJobOccurrence.HasValue)
+                    _scheduleQueue.Enqueue(scheduledJob, nextJobOccurrence.Value);
             }
         }
-
-        while (!cancellationToken.IsCancellationRequested)
+        finally
         {
-            if (!_scheduleQueue.TryPeek(
-                    out ScheduledJob? scheduledJob,
-                    out DateTimeOffset dueAt))
-                break;
+            _executionChannel.Writer.TryComplete();
+        }
+    }
 
-            now = _timeProvider.GetUtcNow();
-
-            if (now < dueAt)
-                await Task.Delay(dueAt - now, _timeProvider, cancellationToken);
-
-            _scheduleQueue.Dequeue();
-
-            try
-            {
-                await scheduledJob.Job.ExecuteAsync(cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch
-            {
-                // logging / dispatching exception to caller later
-            }
-
-            now = _timeProvider.GetUtcNow();
-            DateTimeOffset? nextJobOccurence = scheduledJob.Schedule.GetNextOccurrence(now);
-
-            if (nextJobOccurence.HasValue)
-                _scheduleQueue.Enqueue(scheduledJob, nextJobOccurence.Value);
+    private async Task RunExecutionLoopAsync(CancellationToken cancellationToken = default)
+    {
+        await foreach (ScheduledJob job in _executionChannel.Reader.ReadAllAsync(cancellationToken))
+        {
+            await _jobExecutor.ExecuteAsync(job.Job, cancellationToken);
         }
     }
 }

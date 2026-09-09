@@ -32,7 +32,9 @@ public sealed class SchedulerTests
         Assert.Equal(0, job.ExecutionCount);
 
         await cts.CancelAsync();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await runTask);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await runTask);
     }
 
     [Fact]
@@ -87,24 +89,30 @@ public sealed class SchedulerTests
         Task runTask = scheduler.RunAsync(cts.Token);
 
         timeProvider.Advance(TimeSpan.FromMinutes(5));
+        await job.WaitForExecutionAsync();
+
         Assert.Equal(1, job.ExecutionCount);
 
         timeProvider.Advance(TimeSpan.FromMinutes(5));
+        await job.WaitForExecutionAsync();
+
         Assert.Equal(2, job.ExecutionCount);
 
         timeProvider.Advance(TimeSpan.FromMinutes(5));
+        await job.WaitForExecutionAsync();
+
         Assert.Equal(3, job.ExecutionCount);
 
         await cts.CancelAsync();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await runTask);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await runTask);
     }
-
 
     [Fact]
     public async Task RunAsync_MissedIntervalOccurrences_ExecutesOnceAndSkipsToNextFutureOccurrence()
     {
-        var start = DateTimeOffset.Parse("2026-09-09T12:00:00Z");
+        DateTimeOffset start = DateTimeOffset.Parse("2026-09-09T12:00:00Z");
         var timeProvider = new FakeTimeProvider(start);
         var job = new TestJob();
 
@@ -126,6 +134,7 @@ public sealed class SchedulerTests
         Task runTask = scheduler.RunAsync(cts.Token);
 
         timeProvider.Advance(TimeSpan.FromMinutes(17));
+        await job.WaitForExecutionAsync();
 
         Assert.Equal(1, job.ExecutionCount);
 
@@ -134,12 +143,14 @@ public sealed class SchedulerTests
         Assert.Equal(1, job.ExecutionCount);
 
         timeProvider.Advance(TimeSpan.FromMinutes(1));
+        await job.WaitForExecutionAsync();
 
         Assert.Equal(2, job.ExecutionCount);
 
         await cts.CancelAsync();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await runTask);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await runTask);
     }
 
     [Fact]
@@ -166,7 +177,8 @@ public sealed class SchedulerTests
 
         await cts.CancelAsync();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await runTask);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await runTask);
 
         Assert.Equal(0, job.ExecutionCount);
     }
@@ -196,22 +208,25 @@ public sealed class SchedulerTests
         Task runTask = scheduler.RunAsync(cts.Token);
 
         timeProvider.Advance(TimeSpan.FromMinutes(5));
+        await job.WaitForExecutionAsync();
 
         Assert.Equal(1, job.ExecutionCount);
 
         timeProvider.Advance(TimeSpan.FromMinutes(5));
+        await job.WaitForExecutionAsync();
 
         Assert.Equal(2, job.ExecutionCount);
 
         await cts.CancelAsync();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await runTask);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await runTask);
     }
-    
+
     [Fact]
     public async Task RunAsync_JobThrowsSchedulerCancellation_PropagatesCancellation()
     {
-        var start = DateTimeOffset.Parse("2026-09-09T12:00:00Z");
+        DateTimeOffset start = DateTimeOffset.Parse("2026-09-09T12:00:00Z");
         var timeProvider = new FakeTimeProvider(start);
 
         using var cts = new CancellationTokenSource();
@@ -250,11 +265,19 @@ public sealed class SchedulerTests
 
     private sealed class FailingOnceJob : IJob
     {
+        private readonly SemaphoreSlim _executionSignal = new(0);
+
         public int ExecutionCount { get; private set; }
+
+        public Task WaitForExecutionAsync()
+        {
+            return _executionSignal.WaitAsync();
+        }
 
         public Task ExecuteAsync(CancellationToken cancellationToken)
         {
             ExecutionCount++;
+            _executionSignal.Release();
 
             if (ExecutionCount == 1)
                 throw new InvalidOperationException("Job failed.");
@@ -265,11 +288,20 @@ public sealed class SchedulerTests
 
     private sealed class TestJob : IJob
     {
+        private readonly SemaphoreSlim _executionSignal = new(0);
+
         public int ExecutionCount { get; private set; }
+
+        public Task WaitForExecutionAsync()
+        {
+            return _executionSignal.WaitAsync();
+        }
 
         public Task ExecuteAsync(CancellationToken cancellationToken)
         {
             ExecutionCount++;
+            _executionSignal.Release();
+
             return Task.CompletedTask;
         }
     }
