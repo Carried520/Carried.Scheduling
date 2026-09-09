@@ -250,7 +250,75 @@ public sealed class SchedulerTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             async () => await runTask);
     }
+    
+    
+    [Fact]
+    public async Task RunAsync_ExecutesJobsConcurrentlyUpToConfiguredLimit()
+    {
+        DateTimeOffset start =
+            DateTimeOffset.Parse("2026-09-09T12:00:00Z");
 
+        var timeProvider = new FakeTimeProvider(start);
+
+        var firstJob = new BlockingJob();
+        var secondJob = new BlockingJob();
+
+        var scheduler = new Scheduler(
+            [
+                new ScheduledJob
+                {
+                    Identity = "first",
+                    Job = firstJob,
+                    Schedule = new OneTimeSchedule(start.AddMinutes(5))
+                },
+                new ScheduledJob
+                {
+                    Identity = "second",
+                    Job = secondJob,
+                    Schedule = new OneTimeSchedule(start.AddMinutes(5))
+                }
+            ],
+            timeProvider,
+            maxConcurrency: 2);
+
+        Task runTask = scheduler.RunAsync();
+
+        timeProvider.Advance(TimeSpan.FromMinutes(5));
+
+        await Task.WhenAll(
+            firstJob.Started,
+            secondJob.Started);
+
+        firstJob.Complete();
+        secondJob.Complete();
+
+        await runTask;
+    }
+
+    
+    private sealed class BlockingJob : IJob
+    {
+        private readonly TaskCompletionSource<bool> _started =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private readonly TaskCompletionSource<bool> _completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Started => _started.Task;
+
+        public void Complete()
+        {
+            _completion.TrySetResult(true);
+        }
+
+        public async Task ExecuteAsync(CancellationToken cancellationToken)
+        {
+            _started.TrySetResult(true);
+
+            await _completion.Task.WaitAsync(cancellationToken);
+        }
+    }
+    
     private sealed class CancellingJob(
         CancellationTokenSource cancellationTokenSource) : IJob
     {

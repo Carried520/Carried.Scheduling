@@ -8,19 +8,36 @@ public sealed class Scheduler
     private readonly IReadOnlyList<ScheduledJob> _registeredJobs;
     private readonly JobExecutor _jobExecutor = new();
     private readonly PriorityQueue<ScheduledJob, DateTimeOffset> _scheduleQueue = new();
+    private readonly int _maxConcurrency;
 
     private readonly Channel<ScheduledJob> _executionChannel =
         Channel.CreateUnbounded<ScheduledJob>();
 
-    public Scheduler(IEnumerable<ScheduledJob> registeredJobs, TimeProvider? timeProvider = null)
+    public Scheduler(IEnumerable<ScheduledJob> registeredJobs,
+        TimeProvider? timeProvider = null,
+        int maxConcurrency = 1)
     {
+        ArgumentNullException.ThrowIfNull(registeredJobs);
+
+        if (maxConcurrency <= 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(maxConcurrency),
+                "Maximum concurrency must be greater than zero.");
+
         _registeredJobs = registeredJobs.ToArray();
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _maxConcurrency = maxConcurrency;
     }
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
-        await Task.WhenAll(RunSchedulingLoopAsync(cancellationToken), RunExecutionLoopAsync(cancellationToken));
+        Task schedulingTask = RunSchedulingLoopAsync(cancellationToken);
+
+        Task[] executionTasks = Enumerable.Range(0, _maxConcurrency)
+            .Select(_ => RunExecutionLoopAsync(cancellationToken))
+            .ToArray();
+
+        await Task.WhenAll(executionTasks.Prepend(schedulingTask));
     }
 
     private async Task RunSchedulingLoopAsync(CancellationToken cancellationToken = default)
@@ -70,9 +87,9 @@ public sealed class Scheduler
 
     private async Task RunExecutionLoopAsync(CancellationToken cancellationToken = default)
     {
-        await foreach (ScheduledJob job in _executionChannel.Reader.ReadAllAsync(cancellationToken))
+        await foreach (ScheduledJob scheduledJob in _executionChannel.Reader.ReadAllAsync(cancellationToken))
         {
-            await _jobExecutor.ExecuteAsync(job.Job, cancellationToken);
+            await _jobExecutor.ExecuteAsync(scheduledJob.Job, cancellationToken);
         }
     }
 }
