@@ -32,8 +32,7 @@ public sealed class SchedulerTests
         Assert.Equal(0, job.ExecutionCount);
 
         await cts.CancelAsync();
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            async () => await runTask);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await runTask);
     }
 
     [Fact]
@@ -62,7 +61,7 @@ public sealed class SchedulerTests
 
         Assert.Equal(1, job.ExecutionCount);
     }
-    
+
     [Fact]
     public async Task RunAsync_IntervalSchedule_ExecutesAtEachOccurrence()
     {
@@ -98,11 +97,10 @@ public sealed class SchedulerTests
 
         await cts.CancelAsync();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            async () => await runTask);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await runTask);
     }
-    
-    
+
+
     [Fact]
     public async Task RunAsync_MissedIntervalOccurrences_ExecutesOnceAndSkipsToNextFutureOccurrence()
     {
@@ -141,10 +139,9 @@ public sealed class SchedulerTests
 
         await cts.CancelAsync();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            async () => await runTask);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await runTask);
     }
-    
+
     [Fact]
     public async Task RunAsync_WhenCancelled_StopsScheduler()
     {
@@ -169,10 +166,101 @@ public sealed class SchedulerTests
 
         await cts.CancelAsync();
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            async () => await runTask);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await runTask);
 
         Assert.Equal(0, job.ExecutionCount);
+    }
+
+    [Fact]
+    public async Task RunAsync_JobThrows_ContinuesScheduling()
+    {
+        DateTimeOffset start = DateTimeOffset.Parse("2026-09-09T12:00:00Z");
+        var timeProvider = new FakeTimeProvider(start);
+        var job = new FailingOnceJob();
+
+        var scheduledJob = new ScheduledJob
+        {
+            Identity = "failing-job",
+            Job = job,
+            Schedule = new IntervalSchedule(
+                TimeSpan.FromMinutes(5),
+                start)
+        };
+
+        var scheduler = new Scheduler(
+            [scheduledJob],
+            timeProvider);
+
+        using var cts = new CancellationTokenSource();
+
+        Task runTask = scheduler.RunAsync(cts.Token);
+
+        timeProvider.Advance(TimeSpan.FromMinutes(5));
+
+        Assert.Equal(1, job.ExecutionCount);
+
+        timeProvider.Advance(TimeSpan.FromMinutes(5));
+
+        Assert.Equal(2, job.ExecutionCount);
+
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await runTask);
+    }
+    
+    [Fact]
+    public async Task RunAsync_JobThrowsSchedulerCancellation_PropagatesCancellation()
+    {
+        var start = DateTimeOffset.Parse("2026-09-09T12:00:00Z");
+        var timeProvider = new FakeTimeProvider(start);
+
+        using var cts = new CancellationTokenSource();
+        var job = new CancellingJob(cts);
+
+        var scheduledJob = new ScheduledJob
+        {
+            Identity = "cancellation-job",
+            Job = job,
+            Schedule = new OneTimeSchedule(start.AddMinutes(5))
+        };
+
+        var scheduler = new Scheduler(
+            [scheduledJob],
+            timeProvider);
+
+        Task runTask = scheduler.RunAsync(cts.Token);
+
+        timeProvider.Advance(TimeSpan.FromMinutes(5));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await runTask);
+    }
+
+    private sealed class CancellingJob(
+        CancellationTokenSource cancellationTokenSource) : IJob
+    {
+        public Task ExecuteAsync(CancellationToken cancellationToken)
+        {
+            cancellationTokenSource.Cancel();
+            cancellationToken.ThrowIfCancellationRequested();
+
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FailingOnceJob : IJob
+    {
+        public int ExecutionCount { get; private set; }
+
+        public Task ExecuteAsync(CancellationToken cancellationToken)
+        {
+            ExecutionCount++;
+
+            if (ExecutionCount == 1)
+                throw new InvalidOperationException("Job failed.");
+
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class TestJob : IJob

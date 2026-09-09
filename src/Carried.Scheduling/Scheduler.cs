@@ -39,7 +39,19 @@ public sealed class Scheduler
                 await Task.Delay(dueAt - now, _timeProvider, cancellationToken);
 
             _scheduleQueue.Dequeue();
-            await scheduledJob.Job.ExecuteAsync(cancellationToken);
+
+            try
+            {
+                await scheduledJob.Job.ExecuteAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                // logging / dispatching exception to caller later
+            }
 
             now = _timeProvider.GetUtcNow();
             DateTimeOffset? nextJobOccurence = scheduledJob.Schedule.GetNextOccurrence(now);
